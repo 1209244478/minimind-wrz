@@ -27,6 +27,7 @@ from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from dataset.lm_dataset import AgentRLDataset
 from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, LMForRewardModel
 from trainer.rollout_engine import create_rollout_engine, compute_per_token_logps
+from trainer.agent_tools import TOOLS, MOCK_RESULTS, CHECK_ARGS, parse_tool_calls, execute_tool, SYSTEM_PROMPTS
 
 warnings.filterwarnings('ignore')
 
@@ -37,66 +38,11 @@ def rep_penalty(text, n=3, cap=0.5):
     grams = [tuple(toks[i:i + n]) for i in range(len(toks) - n + 1)]
     return min(cap, (len(grams) - len(set(grams))) * cap * 2 / len(grams)) if grams else 0.0
 
-# ======== 工具定义 ========
-TOOLS = [
-    {"type": "function", "function": {"name": "calculate_math", "description": "计算数学表达式", "parameters": {"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]}}},
-    {"type": "function", "function": {"name": "unit_converter", "description": "单位换算", "parameters": {"type": "object", "properties": {"value": {"type": "number"}, "from_unit": {"type": "string"}, "to_unit": {"type": "string"}}, "required": ["value", "from_unit", "to_unit"]}}},
-    {"type": "function", "function": {"name": "get_current_weather", "description": "获取天气", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}}},
-    {"type": "function", "function": {"name": "get_current_time", "description": "获取时间", "parameters": {"type": "object", "properties": {"timezone": {"type": "string", "default": "Asia/Shanghai"}}, "required": []}}},
-    {"type": "function", "function": {"name": "get_exchange_rate", "description": "查询汇率", "parameters": {"type": "object", "properties": {"from_currency": {"type": "string"}, "to_currency": {"type": "string"}}, "required": ["from_currency", "to_currency"]}}},
-    {"type": "function", "function": {"name": "translate_text", "description": "翻译文本", "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "target_language": {"type": "string"}}, "required": ["text", "target_language"]}}},
-]
-
-# ======== 模拟数据 ========
-WEATHER_DATA = {"北京": ("28°C", "晴"), "上海": ("15°C", "多云"), "广州": ("32°C", "闷热"), "深圳": ("30°C", "晴"), "杭州": ("22°C", "阴"), "成都": ("18°C", "小雨"), "武汉": ("25°C", "多云"), "南京": ("20°C", "晴"), "西安": ("16°C", "大风"), "重庆": ("26°C", "阴"), "Tokyo": ("12°C", "晴"), "New York": ("8°C", "多云"), "London": ("5°C", "小雨"), "Paris": ("10°C", "阴"), "Sydney": ("25°C", "晴朗")}
-TIME_DATA = {"Asia/Shanghai": "2025-03-07 14:30:00", "America/New_York": "2025-03-07 01:30:00", "Europe/London": "2025-03-07 06:30:00", "Asia/Tokyo": "2025-03-07 15:30:00", "Europe/Paris": "2025-03-07 07:30:00", "Australia/Sydney": "2025-03-07 17:30:00"}
-EXCHANGE_DATA = {("USD", "CNY"): 7.21, ("EUR", "CNY"): 7.85, ("GBP", "CNY"): 9.12, ("JPY", "CNY"): 0.048, ("USD", "EUR"): 0.92, ("USD", "GBP"): 0.79, ("CNY", "JPY"): 20.83, ("AUD", "CNY"): 4.72}
-TRANSLATE_DATA = {("你好世界", "english"): "Hello World", ("Good morning", "chinese"): "早上好", ("今天天气真好", "english"): "The weather is nice today", ("I love programming", "chinese"): "我喜欢编程", ("机器学习很有趣", "english"): "Machine learning is interesting", ("Happy birthday", "chinese"): "生日快乐"}
-UNIT_DATA = {"km_miles": 0.621371, "miles_km": 1.60934, "kg_pounds": 2.20462, "pounds_kg": 0.453592, "meters_feet": 3.28084, "feet_meters": 0.3048, "celsius_fahrenheit": 1.8, "fahrenheit_celsius": 0.5556}
-
-# ======== 模拟执行 ========
-MOCK_RESULTS = {
-    "calculate_math": lambda args: {"result": str(eval(str(args.get("expression", "0")).replace("^", "**").replace("×", "*").replace("÷", "/").replace("−", "-").replace("（", "(").replace("）", ")"), {"__builtins__": {}, "math": math}))},
-    "unit_converter": lambda args: {"result": round(float(args.get("value", 0)) * UNIT_DATA.get(f"{args.get('from_unit', '').lower()}_{args.get('to_unit', '').lower()}", 1), 4)},
-    "get_current_weather": lambda args: (lambda w: {"city": args.get("location"), "temperature": w[0], "humidity": "65%", "condition": w[1]})(WEATHER_DATA.get(args.get("location"), ("22°C", "晴"))),
-    "get_current_time": lambda args: {"datetime": TIME_DATA.get(args.get("timezone", "Asia/Shanghai"), "2025-03-07 14:30:00"), "timezone": args.get("timezone", "Asia/Shanghai")},
-    "get_exchange_rate": lambda args: {"from": args.get("from_currency"), "to": args.get("to_currency"), "rate": EXCHANGE_DATA.get((args.get("from_currency"), args.get("to_currency")), 1.0)},
-    "translate_text": lambda args: {"translated_text": TRANSLATE_DATA.get((args.get("text"), args.get("target_language")), args.get("text", ""))},
-}
-
-# ======== 参数校验 ========
-CHECK_ARGS = {
-    "calculate_math": lambda a: bool(a.get("expression")),
-    "unit_converter": lambda a: a.get("value") is not None and a.get("from_unit") and a.get("to_unit"),
-    "get_current_weather": lambda a: bool(a.get("location")),
-    "get_current_time": lambda a: True,
-    "get_exchange_rate": lambda a: bool(a.get("from_currency")) and bool(a.get("to_currency")),
-    "translate_text": lambda a: bool(a.get("text")) and bool(a.get("target_language")),
-}
-
-# ======== 工具调用解析与执行 ========
-def parse_tool_calls(text):
-    calls = []
-    for m in re.findall(r'<tool_call>(.*?)</tool_call>', text, re.DOTALL):
-        try: calls.append(json.loads(m.strip()))
-        except: pass
-    return calls
-
-def execute_tool(name, args):
-    fn = MOCK_RESULTS.get(name)
-    if not fn: return None
-    try:
-        signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError()))
-        signal.alarm(1)
-        return fn(args)
-    except:
-        return None
-    finally:
-        try: signal.alarm(0)
-        except: pass
+# ======== 工具定义已移至 trainer/agent_tools.py ========
+# TOOLS, MOCK_RESULTS, CHECK_ARGS, parse_tool_calls, execute_tool 均从 agent_tools 导入
 
 # ======== 多轮 Rollout ========
-def rollout_single(rollout_engine, tokenizer, messages, tools, max_turns=3, max_new_tokens=256, thinking_ratio=0.5, device="cuda", use_ttt=False, ttt_lr=1e-4, ttt_interval=64):
+def rollout_single(rollout_engine, tokenizer, messages, tools, max_turns=5, max_new_tokens=256, thinking_ratio=0.5, device="cuda", use_ttt=False, ttt_lr=1e-4, ttt_interval=64):
     all_outputs = []
     prompt_ids = None
     response_ids = []
@@ -199,7 +145,7 @@ def rollout_single(rollout_engine, tokenizer, messages, tools, max_turns=3, max_
     prompt_ids = prompt_ids or []
     return final_output, final_context, prompt_ids, response_ids, response_mask, response_old_logps, list(all_outputs), unfinished
 
-def rollout_batch(rollout_engine, tokenizer, messages_batch, tools_batch, num_gen, max_turns=3, max_new_tokens=256, thinking_ratio=0.5, device="cuda", use_ttt=False, ttt_lr=1e-4, ttt_interval=64):
+def rollout_batch(rollout_engine, tokenizer, messages_batch, tools_batch, num_gen, max_turns=5, max_new_tokens=256, thinking_ratio=0.5, device="cuda", use_ttt=False, ttt_lr=1e-4, ttt_interval=64):
     all_completions = []
     all_contexts = []
     all_prompt_ids = []
@@ -229,10 +175,15 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
         messages_batch = batch['messages']
         tools_batch = batch['tools']
         gt_batch = batch['gt']
+        for msgs in messages_batch:
+            if msgs and msgs[0].get('role') != 'system':
+                msgs.insert(0, {'role': 'system', 'content': system_prompt})
+            elif msgs and msgs[0].get('role') == 'system' and args.system_prompt_type != 'default':
+                msgs[0]['content'] = system_prompt
         last_step = step
 
         with torch.no_grad():
-            completions, contexts, prompt_ids_batch, response_ids_batch, response_masks_batch, response_old_logps_batch, turn_outputs_batch, unfinished_batch = rollout_batch(rollout_engine, tokenizer, messages_batch, tools_batch, args.num_generations, max_turns=3, max_new_tokens=args.max_gen_len, thinking_ratio=args.thinking_ratio, device=args.device, use_ttt=bool(args.use_ttt), ttt_lr=args.ttt_lr, ttt_interval=args.ttt_interval)
+            completions, contexts, prompt_ids_batch, response_ids_batch, response_masks_batch, response_old_logps_batch, turn_outputs_batch, unfinished_batch = rollout_batch(rollout_engine, tokenizer, messages_batch, tools_batch, args.num_generations, max_turns=args.max_turns, max_new_tokens=args.max_gen_len, thinking_ratio=args.thinking_ratio, device=args.device, use_ttt=bool(args.use_ttt), ttt_lr=args.ttt_lr, ttt_interval=args.ttt_interval)
 
         prompts = [tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True, tools=t) for m, t in zip(messages_batch, tools_batch)]
 
@@ -383,8 +334,10 @@ if __name__ == "__main__":
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE")
     parser.add_argument('--max_seq_len', default=1024, type=int, help="最大序列长度")
     parser.add_argument("--max_gen_len", type=int, default=768, help="单次最大生成长度")
-    parser.add_argument("--max_total_len", type=int, default=2500, help="训练侧最终总长度上界")
+    parser.add_argument("--max_total_len", type=int, default=4096, help="训练侧最终总长度上界")
+    parser.add_argument("--max_turns", type=int, default=5, help="Agent 最大工具调用轮数")
     parser.add_argument("--data_path", type=str, default="../dataset/agent_rl.jsonl", help="训练数据路径")
+    parser.add_argument('--config', default=None, type=str, help="从JSON配置文件加载模型参数（优先级高于hidden_size/num_hidden_layers/use_moe）")
     parser.add_argument("--num_generations", type=int, default=4, help="每个prompt生成数量")
     parser.add_argument("--beta", type=float, default=0.1, help="KL散度惩罚系数")
     parser.add_argument("--loss_type", type=str, default="cispo", choices=["grpo", "cispo"], help="loss类型")
@@ -398,6 +351,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug_mode", action="store_true", help="调试模式")
     parser.add_argument("--debug_interval", type=int, default=20, help="调试日志间隔")
     parser.add_argument("--thinking_ratio", type=float, default=0.1, help="按概率开启thinking（0.0~1.0）")
+    parser.add_argument("--system_prompt_type", type=str, default="default", choices=["default", "react", "plan_execute"], help="Agent系统提示模板类型")
     parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径")
     parser.add_argument("--rollout_engine", type=str, default="torch", choices=["torch", "sglang"], help="rollout引擎类型")
     parser.add_argument("--sglang_base_url", type=str, default="http://localhost:8998", help="SGLang服务器URL")
@@ -413,8 +367,14 @@ if __name__ == "__main__":
     setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
 
     os.makedirs(args.save_dir, exist_ok=True)
-    lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers,
-                               max_seq_len=args.max_seq_len + args.max_gen_len, use_moe=bool(args.use_moe))
+    if args.config:
+        with open(args.config, 'r', encoding='utf-8') as f:
+            config_dict = json.load(f)
+        lm_config = MiniMindConfig(**{k: v for k, v in config_dict.items() if k in MiniMindConfig().__dict__})
+        Logger(f'Loaded config from {args.config}: hidden_size={lm_config.hidden_size}, num_hidden_layers={lm_config.num_hidden_layers}')
+    else:
+        lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers,
+                                   max_seq_len=args.max_seq_len + args.max_gen_len, use_moe=bool(args.use_moe))
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='../checkpoints') if args.from_resume == 1 else None
 
     device_type = "cuda" if "cuda" in args.device else "cpu"
@@ -447,6 +407,8 @@ if __name__ == "__main__":
         sglang_shared_path=args.sglang_shared_path,
     )
     train_ds = AgentRLDataset(args.data_path, tokenizer, max_length=lm_config.max_seq_len)
+    system_prompt = SYSTEM_PROMPTS.get(args.system_prompt_type, SYSTEM_PROMPTS["default"])
+    Logger(f"System prompt type: {args.system_prompt_type}")
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
     def collate_fn(batch): return {'messages': [b['messages'] for b in batch], 'tools': [b['tools'] for b in batch], 'gt': [b['gt'] for b in batch]}

@@ -13,44 +13,134 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from openai import OpenAI
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from trainer.trainer_utils import setup_seed, get_model_params
+from trainer.agent_tools import TOOLS, TOOL_MAP, MOCK_RESULTS, CHECK_ARGS, parse_tool_calls as _parse_tool_calls, execute_tool as _execute_tool
 warnings.filterwarnings('ignore')
 
-TOOLS = [
-    {"type": "function", "function": {"name": "calculate_math", "description": "计算数学表达式的结果，支持加减乘除、幂运算、开方等", "parameters": {"type": "object", "properties": {"expression": {"type": "string", "description": "数学表达式，如123+456、2**10、sqrt(144)"}}, "required": ["expression"]}}},
-    {"type": "function", "function": {"name": "get_current_time", "description": "获取当前日期和时间，支持指定时区", "parameters": {"type": "object", "properties": {"timezone": {"type": "string", "description": "时区名称，如Asia/Shanghai、America/New_York", "default": "Asia/Shanghai"}}, "required": []}}},
-    {"type": "function", "function": {"name": "random_number", "description": "生成指定范围内的随机数", "parameters": {"type": "object", "properties": {"min": {"type": "integer", "description": "最小值", "default": 0}, "max": {"type": "integer", "description": "最大值", "default": 100}}, "required": []}}},
-    {"type": "function", "function": {"name": "text_length", "description": "计算文本的字符数和单词数", "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "要统计的文本"}}, "required": ["text"]}}},
-    {"type": "function", "function": {"name": "unit_converter", "description": "进行单位换算，支持长度、重量、温度等", "parameters": {"type": "object", "properties": {"value": {"type": "number", "description": "要转换的数值"}, "from_unit": {"type": "string", "description": "源单位，如km、miles、kg、pounds、celsius、fahrenheit"}, "to_unit": {"type": "string", "description": "目标单位"}}, "required": ["value", "from_unit", "to_unit"]}}},
-    {"type": "function", "function": {"name": "get_current_weather", "description": "获取指定城市的当前天气信息，包括温度、湿度和天气状况", "parameters": {"type": "object", "properties": {"location": {"type": "string", "description": "城市名称，如北京、上海、New York"}, "unit": {"type": "string", "description": "温度单位，celsius或fahrenheit", "enum": ["celsius", "fahrenheit"], "default": "celsius"}}, "required": ["location"]}}},
-    {"type": "function", "function": {"name": "get_exchange_rate", "description": "查询两种货币之间的实时汇率", "parameters": {"type": "object", "properties": {"from_currency": {"type": "string", "description": "源货币代码，如USD、CNY、EUR"}, "to_currency": {"type": "string", "description": "目标货币代码，如USD、CNY、EUR"}}, "required": ["from_currency", "to_currency"]}}},
-    {"type": "function", "function": {"name": "translate_text", "description": "将文本翻译成目标语言", "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "要翻译的文本"}, "target_language": {"type": "string", "description": "目标语言，如english、chinese、japanese、french"}}, "required": ["text", "target_language"]}}},
-]
-
-MOCK_RESULTS = {
-    "calculate_math": lambda args: {"result": str(eval(str(args.get("expression", "0")).replace("^", "**").replace("×", "*").replace("÷", "/").replace("−", "-").replace("²", "**2").replace("³", "**3").replace("（", "(").replace("）", ")")))},
-    "get_current_time": lambda args: {"datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "timezone": args.get("timezone", "Asia/Shanghai")},
-    "random_number": lambda args: {"result": random.randint(int(args.get("min", 0)), int(args.get("max", 100)))},
-    "text_length": lambda args: {"characters": len(args.get("text", "")), "words": len(args.get("text", "").split())},
-    "unit_converter": lambda args: {"result": round(float(args.get("value", 0)) * 0.621371, 2), "from": f"{args.get('value', 0)} {args.get('from_unit', '')}", "to": args.get("to_unit", "")},
-    "get_current_weather": lambda args: {"city": args.get("location"), "temperature": "22°C", "humidity": "65%", "condition": "晴"},
-    "get_exchange_rate": lambda args: {"from": args.get("from_currency", ""), "to": args.get("to_currency", ""), "rate": 7.15},
-    "translate_text": lambda args: {"translated": "hello world"},
-}
-
-TOOL_MAP = {t["function"]["name"]: t for t in TOOLS}
 
 def get_tools(names):
-    return [TOOL_MAP[n] for n in names]
+    return [TOOL_MAP[n] for n in names if n in TOOL_MAP]
+
 
 TEST_CASES = [
-    {"prompt": "帮我算一下 256 乘以 37 等于多少", "tools": ["calculate_math", "get_current_time"]},
-    {"prompt": "现在几点了？", "tools": ["get_current_time", "random_number"]},
-    {"prompt": "帮我把100公里换算成英里", "tools": ["unit_converter", "calculate_math"]},
-    {"prompt": "帮我生成一个1到1000的随机数，然后计算它的平方", "tools": ["random_number", "calculate_math", "text_length"]},
-    {"prompt": "北京今天天气怎么样？", "tools": ["get_current_weather", "get_current_time"]},
-    {"prompt": "查一下美元兑人民币汇率", "tools": ["get_exchange_rate", "get_current_time"]},
-    {"prompt": "把'你好世界'翻译成英文", "tools": ["translate_text", "text_length"]},
-    {"prompt": "What is the weather in Tokyo? Also convert 30 celsius to fahrenheit.", "tools": ["get_current_weather", "unit_converter", "get_current_time"]},
+    {"prompt": "帮我算一下 256 乘以 37 等于多少", "tools": ["calculate_math", "get_current_time"], "expected_tool": "calculate_math"},
+    {"prompt": "现在几点了？", "tools": ["get_current_time", "random_number"], "expected_tool": "get_current_time"},
+    {"prompt": "帮我把100公里换算成英里", "tools": ["unit_converter", "calculate_math"], "expected_tool": "unit_converter"},
+    {"prompt": "帮我生成一个1到1000的随机数，然后计算它的平方", "tools": ["random_number", "calculate_math", "text_length"], "expected_tool": "random_number"},
+    {"prompt": "北京今天天气怎么样？", "tools": ["get_current_weather", "get_current_time"], "expected_tool": "get_current_weather"},
+    {"prompt": "查一下美元兑人民币汇率", "tools": ["get_exchange_rate", "get_current_time"], "expected_tool": "get_exchange_rate"},
+    {"prompt": "把'你好世界'翻译成英文", "tools": ["translate_text", "text_length"], "expected_tool": "translate_text"},
+    {"prompt": "What is the weather in Tokyo? Also convert 30 celsius to fahrenheit.", "tools": ["get_current_weather", "unit_converter", "get_current_time"], "expected_tool": "get_current_weather"},
+    {"prompt": "计算 2 的 10 次方", "tools": ["calculate_math", "random_number"], "expected_tool": "calculate_math"},
+    {"prompt": "上海现在几度？", "tools": ["get_current_weather", "unit_converter"], "expected_tool": "get_current_weather"},
+    {"prompt": "1000 美元能换多少人民币？", "tools": ["get_exchange_rate", "calculate_math"], "expected_tool": "get_exchange_rate"},
+    {"prompt": "把 'Hello World' 翻译成中文", "tools": ["translate_text", "text_length"], "expected_tool": "translate_text"},
+    {"prompt": "伦敦现在几点？", "tools": ["get_current_time", "get_current_weather"], "expected_tool": "get_current_time"},
+    {"prompt": "帮我算 999 除以 3", "tools": ["calculate_math"], "expected_tool": "calculate_math"},
+    {"prompt": "纽约天气如何？", "tools": ["get_current_weather", "get_current_time"], "expected_tool": "get_current_weather"},
+    {"prompt": "50公斤等于多少磅？", "tools": ["unit_converter", "calculate_math"], "expected_tool": "unit_converter"},
+    {"prompt": "帮我搜索一下人工智能的最新进展", "tools": ["web_search", "summarize_text"], "expected_tool": "web_search"},
+    {"prompt": "读取 /home/user/readme.txt 文件", "tools": ["read_file", "list_directory"], "expected_tool": "read_file"},
+    {"prompt": "列出 /home/user 目录下的文件", "tools": ["list_directory", "read_file"], "expected_tool": "list_directory"},
+    {"prompt": "查询销售数据库中价格大于1000的记录", "tools": ["sql_query", "calculate_math"], "expected_tool": "sql_query"},
+    {"prompt": "苹果公司（AAPL）的股价是多少？", "tools": ["get_stock_price", "get_exchange_rate"], "expected_tool": "get_stock_price"},
+    {"prompt": "从北京到上海怎么走？", "tools": ["get_route", "get_current_weather"], "expected_tool": "get_route"},
+    {"prompt": "2025-03-07有什么日程安排？", "tools": ["check_schedule", "create_event"], "expected_tool": "check_schedule"},
+    {"prompt": "帮我创建一个会议：项目讨论，2025-03-10 09:00到10:00", "tools": ["create_event", "check_schedule"], "expected_tool": "create_event"},
+    {"prompt": "帮我总结一下这段文字：人工智能是计算机科学的一个分支", "tools": ["summarize_text", "text_length"], "expected_tool": "summarize_text"},
+    {"prompt": "生成一个10到100的随机数", "tools": ["random_number", "calculate_math"], "expected_tool": "random_number"},
+    {"prompt": "统计'你好世界'的字符数", "tools": ["text_length", "translate_text"], "expected_tool": "text_length"},
+    {"prompt": "给 zhangsan@example.com 发一封邮件", "tools": ["send_email", "check_schedule"], "expected_tool": "send_email"},
+    {"prompt": "告诉我关于北京的信息", "tools": ["get_location_info", "get_current_weather"], "expected_tool": "get_location_info"},
+    {"prompt": "帮我运行 print('Hello World')", "tools": ["python_exec", "calculate_math"], "expected_tool": "python_exec"},
+    {"prompt": "设置一个60秒的倒计时", "tools": ["countdown_timer", "get_current_time"], "expected_tool": "countdown_timer"},
+    {"prompt": "帮我写一个文件到 /home/user/test.txt", "tools": ["write_file", "read_file"], "expected_tool": "write_file"},
+    {"prompt": "搜索Python教程", "tools": ["web_search", "summarize_text"], "expected_tool": "web_search"},
+    {"prompt": "东京的经纬度是多少？", "tools": ["get_location_info", "get_current_weather"], "expected_tool": "get_location_info"},
+    {"prompt": "计算 3.14 乘以 100", "tools": ["calculate_math", "unit_converter"], "expected_tool": "calculate_math"},
+    {"prompt": "帮我查一下欧元兑人民币的汇率", "tools": ["get_exchange_rate", "calculate_math"], "expected_tool": "get_exchange_rate"},
+    {"prompt": "把'今天天气真好'翻译成英文", "tools": ["translate_text", "text_length"], "expected_tool": "translate_text"},
+    {"prompt": "广州天气怎么样？", "tools": ["get_current_weather", "get_route"], "expected_tool": "get_current_weather"},
+    {"prompt": "帮我算 1024 除以 8", "tools": ["calculate_math", "random_number"], "expected_tool": "calculate_math"},
+    {"prompt": "36.5摄氏度等于多少华氏度？", "tools": ["unit_converter", "calculate_math"], "expected_tool": "unit_converter"},
+    {"prompt": "帮我搜索深度学习相关内容", "tools": ["web_search", "summarize_text"], "expected_tool": "web_search"},
+    {"prompt": "读取 /home/user/data/config.json", "tools": ["read_file", "list_directory"], "expected_tool": "read_file"},
+    {"prompt": "查询员工数据库中的记录", "tools": ["sql_query", "calculate_math"], "expected_tool": "sql_query"},
+    {"prompt": "谷歌（GOOGL）的股价是多少？", "tools": ["get_stock_price", "get_exchange_rate"], "expected_tool": "get_stock_price"},
+    {"prompt": "从上海到杭州怎么走？", "tools": ["get_route", "get_current_weather"], "expected_tool": "get_route"},
+    {"prompt": "帮我看看明天有什么安排", "tools": ["check_schedule", "create_event"], "expected_tool": "check_schedule"},
+    {"prompt": "安排一个代码审查会议，下午2点到3点", "tools": ["create_event", "check_schedule"], "expected_tool": "create_event"},
+    {"prompt": "帮我总结一段关于Python的文字", "tools": ["summarize_text", "text_length"], "expected_tool": "summarize_text"},
+    {"prompt": "生成5个1到10的随机数", "tools": ["random_number", "calculate_math"], "expected_tool": "random_number"},
+    {"prompt": "统计 'The quick brown fox' 的字数", "tools": ["text_length", "translate_text"], "expected_tool": "text_length"},
+    {"prompt": "给团队发一封周报邮件", "tools": ["send_email", "check_schedule"], "expected_tool": "send_email"},
+    {"prompt": "伦敦在哪里？", "tools": ["get_location_info", "get_current_weather"], "expected_tool": "get_location_info"},
+    {"prompt": "运行 import math; print(math.pi)", "tools": ["python_exec", "calculate_math"], "expected_tool": "python_exec"},
+    {"prompt": "设置一个5分钟的倒计时", "tools": ["countdown_timer", "get_current_time"], "expected_tool": "countdown_timer"},
+    {"prompt": "把数据写入 /home/user/output.csv", "tools": ["write_file", "read_file"], "expected_tool": "write_file"},
+    {"prompt": "Calculate 500 plus 123", "tools": ["calculate_math", "unit_converter"], "expected_tool": "calculate_math"},
+    {"prompt": "What's the weather like in Paris?", "tools": ["get_current_weather", "get_current_time"], "expected_tool": "get_current_weather"},
+    {"prompt": "Convert 72 degrees Fahrenheit to Celsius", "tools": ["unit_converter", "calculate_math"], "expected_tool": "unit_converter"},
+    {"prompt": "Search for transformer architecture", "tools": ["web_search", "summarize_text"], "expected_tool": "web_search"},
+    {"prompt": "Read the file /home/user/notes/meeting.txt", "tools": ["read_file", "summarize_text"], "expected_tool": "read_file"},
+    {"prompt": "List files in /home/user/data", "tools": ["list_directory", "read_file"], "expected_tool": "list_directory"},
+    {"prompt": "Query the sales database for all records", "tools": ["sql_query", "calculate_math"], "expected_tool": "sql_query"},
+    {"prompt": "What's TSLA stock price?", "tools": ["get_stock_price", "get_exchange_rate"], "expected_tool": "get_stock_price"},
+    {"prompt": "How to get from New York to Los Angeles?", "tools": ["get_route", "get_current_weather"], "expected_tool": "get_route"},
+    {"prompt": "Check my schedule for 2025-03-08", "tools": ["check_schedule", "create_event"], "expected_tool": "check_schedule"},
+    {"prompt": "Create a meeting: 技术分享, 2025-03-11 10:00 to 11:30", "tools": ["create_event", "check_schedule"], "expected_tool": "create_event"},
+    {"prompt": "Summarize this text about machine learning", "tools": ["summarize_text", "text_length"], "expected_tool": "summarize_text"},
+    {"prompt": "Give me a random number between 100 and 999", "tools": ["random_number", "calculate_math"], "expected_tool": "random_number"},
+    {"prompt": "Count the characters in '人工智能正在改变世界'", "tools": ["text_length", "translate_text"], "expected_tool": "text_length"},
+    {"prompt": "Send an email to team@group.org about the project update", "tools": ["send_email", "check_schedule"], "expected_tool": "send_email"},
+    {"prompt": "Where is New York located?", "tools": ["get_location_info", "get_current_weather"], "expected_tool": "get_location_info"},
+    {"prompt": "Execute this Python code: x = [1,2,3]; print(sum(x))", "tools": ["python_exec", "calculate_math"], "expected_tool": "python_exec"},
+    {"prompt": "Set a timer for 2 minutes", "tools": ["countdown_timer", "get_current_time"], "expected_tool": "countdown_timer"},
+    {"prompt": "Write data to /home/user/data/results.json", "tools": ["write_file", "read_file"], "expected_tool": "write_file"},
+    {"prompt": "帮我算 88 乘以 12", "tools": ["calculate_math", "unit_converter"], "expected_tool": "calculate_math"},
+    {"prompt": "深圳天气如何？", "tools": ["get_current_weather", "get_route"], "expected_tool": "get_current_weather"},
+    {"prompt": "100英里等于多少公里？", "tools": ["unit_converter", "calculate_math"], "expected_tool": "unit_converter"},
+    {"prompt": "搜索大语言模型相关信息", "tools": ["web_search", "summarize_text"], "expected_tool": "web_search"},
+    {"prompt": "查看 /home/user/data/sales.csv", "tools": ["read_file", "sql_query"], "expected_tool": "read_file"},
+    {"prompt": "微软（MSFT）股价多少？", "tools": ["get_stock_price", "get_exchange_rate"], "expected_tool": "get_stock_price"},
+    {"prompt": "从北京到广州的路线", "tools": ["get_route", "get_current_weather"], "expected_tool": "get_route"},
+    {"prompt": "我明天有什么安排？", "tools": ["check_schedule", "create_event"], "expected_tool": "check_schedule"},
+    {"prompt": "帮我安排一个需求评审会议", "tools": ["create_event", "check_schedule"], "expected_tool": "create_event"},
+    {"prompt": "帮我总结一段关于深度学习的文字", "tools": ["summarize_text", "text_length"], "expected_tool": "summarize_text"},
+    {"prompt": "生成一个100到999的随机数", "tools": ["random_number", "calculate_math"], "expected_tool": "random_number"},
+    {"prompt": "统计'机器学习很有趣'的字符数", "tools": ["text_length", "translate_text"], "expected_tool": "text_length"},
+    {"prompt": "给 lisi@company.com 发送会议通知", "tools": ["send_email", "check_schedule"], "expected_tool": "send_email"},
+    {"prompt": "上海在哪个国家？经纬度是多少？", "tools": ["get_location_info", "get_current_weather"], "expected_tool": "get_location_info"},
+    {"prompt": "运行 print(2**10)", "tools": ["python_exec", "calculate_math"], "expected_tool": "python_exec"},
+    {"prompt": "设置一个10分钟的倒计时", "tools": ["countdown_timer", "get_current_time"], "expected_tool": "countdown_timer"},
+    {"prompt": "把结果写入 /home/user/output.txt", "tools": ["write_file", "read_file"], "expected_tool": "write_file"},
+    {"prompt": "Calculate sqrt(144)", "tools": ["calculate_math", "random_number"], "expected_tool": "calculate_math"},
+    {"prompt": "What time is it in Tokyo?", "tools": ["get_current_time", "get_current_weather"], "expected_tool": "get_current_time"},
+    {"prompt": "Convert 25 kg to pounds", "tools": ["unit_converter", "calculate_math"], "expected_tool": "unit_converter"},
+    {"prompt": "Search for RLHF training methods", "tools": ["web_search", "summarize_text"], "expected_tool": "web_search"},
+    {"prompt": "Read the configuration file", "tools": ["read_file", "list_directory"], "expected_tool": "read_file"},
+    {"prompt": "Query the employees database", "tools": ["sql_query", "calculate_math"], "expected_tool": "sql_query"},
+    {"prompt": "What's Amazon's stock price?", "tools": ["get_stock_price", "get_exchange_rate"], "expected_tool": "get_stock_price"},
+    {"prompt": "Route from Chengdu to Chongqing", "tools": ["get_route", "get_current_weather"], "expected_tool": "get_route"},
+    {"prompt": "Any meetings on 2025-03-09?", "tools": ["check_schedule", "create_event"], "expected_tool": "check_schedule"},
+    {"prompt": "Schedule a weekly meeting", "tools": ["create_event", "check_schedule"], "expected_tool": "create_event"},
+    {"prompt": "Summarize this article about AI", "tools": ["summarize_text", "text_length"], "expected_tool": "summarize_text"},
+    {"prompt": "Roll a dice (1-6)", "tools": ["random_number", "calculate_math"], "expected_tool": "random_number"},
+    {"prompt": "How many words in 'I love programming'?", "tools": ["text_length", "translate_text"], "expected_tool": "text_length"},
+    {"prompt": "Send a code review request email", "tools": ["send_email", "check_schedule"], "expected_tool": "send_email"},
+    {"prompt": "Tell me about Sydney", "tools": ["get_location_info", "get_current_weather"], "expected_tool": "get_location_info"},
+    {"prompt": "Execute: print(sum(range(1,101)))", "tools": ["python_exec", "calculate_math"], "expected_tool": "python_exec"},
+    {"prompt": "Set a 30 second timer", "tools": ["countdown_timer", "get_current_time"], "expected_tool": "countdown_timer"},
+    {"prompt": "Save results to /home/user/data/output.json", "tools": ["write_file", "read_file"], "expected_tool": "write_file"},
+    {"prompt": "帮我查一下北京和上海的天气，哪个更热？", "tools": ["get_current_weather", "calculate_math"], "expected_tool": "get_current_weather", "multi_turn": True},
+    {"prompt": "我有500美元，换成人民币是多少？", "tools": ["get_exchange_rate", "calculate_math"], "expected_tool": "get_exchange_rate", "multi_turn": True},
+    {"prompt": "查一下北京天气，然后告诉我从北京到上海怎么走", "tools": ["get_current_weather", "get_route"], "expected_tool": "get_current_weather", "multi_turn": True},
+    {"prompt": "搜索人工智能，然后总结搜索结果", "tools": ["web_search", "summarize_text"], "expected_tool": "web_search", "multi_turn": True},
+    {"prompt": "查一下AAPL股价，然后换算成人民币", "tools": ["get_stock_price", "get_exchange_rate"], "expected_tool": "get_stock_price", "multi_turn": True},
+    {"prompt": "现在几点了？顺便查一下北京和东京的天气", "tools": ["get_current_time", "get_current_weather"], "expected_tool": "get_current_time", "multi_turn": True},
+    {"prompt": "读取 /home/user/readme.txt 然后总结内容", "tools": ["read_file", "summarize_text"], "expected_tool": "read_file", "multi_turn": True},
+    {"prompt": "生成一个随机数然后计算它的平方", "tools": ["random_number", "calculate_math"], "expected_tool": "random_number", "multi_turn": True},
+    {"prompt": "把'你好世界'翻译成英文，然后统计翻译后的字符数", "tools": ["translate_text", "text_length"], "expected_tool": "translate_text", "multi_turn": True},
+    {"prompt": "看看今天的日程，然后帮我加一个会议", "tools": ["check_schedule", "create_event"], "expected_tool": "check_schedule", "multi_turn": True},
 ]
 
 
@@ -67,49 +157,42 @@ def init_model(args):
     return model.half().eval().to(args.device), tokenizer
 
 
-def parse_tool_calls(text):
-    matches = re.findall(r'<tool_call>(.*?)</tool_call>', text, re.DOTALL)
-    calls = []
-    for m in matches:
-        try:
-            calls.append(json.loads(m.strip()))
-        except Exception:
-            pass
-    return calls
-
-
 def parse_tool_call_from_text(content):
-    pattern = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
-    matches = re.findall(pattern, content, re.DOTALL)
-    if not matches:
+    calls = _parse_tool_calls(content)
+    if not calls:
+        pattern = r'【\s*(\{.*?\})\s*】'
+        matches = re.findall(pattern, content, re.DOTALL)
+        for m in matches:
+            try:
+                calls.append(json.loads(m.strip()))
+            except Exception:
+                pass
+    if not calls:
         return None
     tool_calls = []
-    for i, match in enumerate(matches):
-        try:
-            data = json.loads(match)
-            tool_calls.append({
-                "id": f"call_{i}",
-                "function": {"name": data.get("name", ""), "arguments": json.dumps(data.get("arguments", {}), ensure_ascii=False)}
-            })
-        except Exception:
-            pass
+    for i, data in enumerate(calls):
+        tool_calls.append({
+            "id": f"call_{i}",
+            "name": data.get("name", ""),
+            "arguments": json.dumps(data.get("arguments", {}), ensure_ascii=False)
+        })
     return tool_calls if tool_calls else None
 
 
-def execute_tool(call, arguments=None):
-    name = call.get("name", "") if isinstance(call, dict) else call
+def execute_tool_eval(name, args_str=None, args_dict=None):
     try:
-        raw_args = call.get("arguments", {}) if isinstance(call, dict) else arguments
-        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        if args_dict:
+            args = args_dict
+        elif args_str:
+            args = json.loads(args_str) if isinstance(args_str, str) else args_str
+        else:
+            args = {}
     except Exception:
         args = {}
-    fn = MOCK_RESULTS.get(name)
-    if not fn:
-        return {"error": f"未知工具: {name}"}
-    try:
-        return fn(args)
-    except Exception as e:
-        return {"error": f"工具执行失败: {str(e)[:80]}"}
+    result = _execute_tool(name, args)
+    if result is None:
+        return {"error": f"工具执行失败: {name}"}
+    return result
 
 
 def generate(model, tokenizer, messages, tools, args):
@@ -176,64 +259,130 @@ def chat_api(client, messages, tools, args, stream=True):
 
 def run_case(prompt, tools, args, model=None, tokenizer=None, client=None):
     messages = [{"role": "user", "content": prompt}]
-    while True:
+    max_turns = 5
+    turn = 0
+    while turn < max_turns:
+        turn += 1
         if args.backend == 'local':
             content = generate(model, tokenizer, messages, tools, args)
-            tool_calls = parse_tool_calls(content)
+            tool_calls = parse_tool_call_from_text(content)
         else:
             content, tool_calls = chat_api(client, messages, tools, args, stream=bool(args.stream))
         if not tool_calls:
             break
-        tool_calls = [{
-            "id": tc.id if hasattr(tc, 'id') else tc.get("id", ""),
-            "name": tc.function.name if hasattr(tc, 'function') else tc["function"]["name"],
-            "arguments": tc.function.arguments if hasattr(tc, 'function') else tc["function"]["arguments"]
-        } for tc in tool_calls] if args.backend == 'api' else tool_calls
+        if args.backend == 'api' and tool_calls:
+            tool_calls = [{
+                "id": tc.id if hasattr(tc, 'id') else tc.get("id", ""),
+                "name": tc.function.name if hasattr(tc, 'function') else tc["function"]["name"],
+                "arguments": tc.function.arguments if hasattr(tc, 'function') else tc["function"]["arguments"]
+            } for tc in tool_calls]
         messages.append({"role": "assistant", "content": content} if args.backend == 'local' else {"role": "assistant", "content": content, "tool_calls": [{"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}} for tc in tool_calls]})
         for tc in tool_calls:
             name = tc["name"]
             arguments = tc["arguments"]
             print(f'📞 [Tool Calling]: {name} | args={arguments}')
-            result = execute_tool(tc if args.backend == 'local' else name, arguments)
+            result = execute_tool_eval(name, arguments)
             print(f'✅ [Tool Called]: {json.dumps(result, ensure_ascii=False)}')
             messages.append({"role": "tool", "content": json.dumps(result, ensure_ascii=False)} if args.backend == 'local' else {"role": "tool", "content": json.dumps(result, ensure_ascii=False), "tool_call_id": tc["id"]})
+    return messages
+
+
+def run_benchmark(args, model=None, tokenizer=None, client=None):
+    results = {"total": 0, "correct_tool": 0, "tool_called": 0, "args_valid": 0, "multi_turn_total": 0, "multi_turn_success": 0}
+    for i, case in enumerate(TEST_CASES):
+        results["total"] += 1
+        prompt = case["prompt"]
+        tool_names = case["tools"]
+        expected_tool = case.get("expected_tool", "")
+        is_multi = case.get("multi_turn", False)
+        if is_multi:
+            results["multi_turn_total"] += 1
+        tools = get_tools(tool_names)
+        print(f'\n{"="*60}')
+        print(f'[Test {i+1}/{len(TEST_CASES)}] {prompt}')
+        print(f'Expected tool: {expected_tool} | Available: {tool_names}')
+        print(f'{"="*60}')
+        messages = run_case(prompt, tools, args, model=model, tokenizer=tokenizer, client=client)
+        tool_found = False
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                parsed = parse_tool_call_from_text(content)
+                if parsed:
+                    results["tool_called"] += 1
+                    tool_found = True
+                    for tc in parsed:
+                        if tc["name"] == expected_tool:
+                            results["correct_tool"] += 1
+                        try:
+                            args_dict = json.loads(tc["arguments"]) if isinstance(tc["arguments"], str) else tc["arguments"]
+                            if CHECK_ARGS.get(tc["name"], lambda a: True)(args_dict):
+                                results["args_valid"] += 1
+                        except Exception:
+                            pass
+                    break
+        if is_multi and tool_found:
+            tool_call_count = sum(1 for msg in messages if msg.get("role") == "assistant" and parse_tool_call_from_text(msg.get("content", "")))
+            if tool_call_count >= 2:
+                results["multi_turn_success"] += 1
+    print(f'\n{"="*60}')
+    print(f'Benchmark Results ({results["total"]} cases)')
+    print(f'{"="*60}')
+    print(f'Tool Call Rate:    {results["tool_called"]}/{results["total"]} = {results["tool_called"]/max(results["total"],1)*100:.1f}%')
+    print(f'Correct Tool Rate: {results["correct_tool"]}/{results["total"]} = {results["correct_tool"]/max(results["total"],1)*100:.1f}%')
+    print(f'Valid Args Rate:   {results["args_valid"]}/{results["total"]} = {results["args_valid"]/max(results["total"],1)*100:.1f}%')
+    if results["multi_turn_total"] > 0:
+        print(f'Multi-turn Rate:   {results["multi_turn_success"]}/{results["multi_turn_total"]} = {results["multi_turn_success"]/max(results["multi_turn_total"],1)*100:.1f}%')
+    return results
 
 
 def main():
     parser = argparse.ArgumentParser(description="MiniMind ToolCall评测")
-    parser.add_argument('--backend', default='local', choices=['local', 'api'], type=str, help="推理后端（local=本地模型，api=OpenAI兼容接口）")
-    parser.add_argument('--load_from', default='../model', type=str, help="模型加载路径（model=原生torch权重，其他路径=transformers格式）")
+    parser.add_argument('--backend', default='local', choices=['local', 'api'], type=str, help="推理后端")
+    parser.add_argument('--load_from', default='../model', type=str, help="模型加载路径")
     parser.add_argument('--save_dir', default='../out', type=str, help="模型权重目录")
-    parser.add_argument('--weight', default='full_sft', type=str, help="权重名称前缀（pretrain, full_sft, rlhf, reason, ppo_actor, grpo, spo）")
+    parser.add_argument('--weight', default='full_sft', type=str, help="权重名称前缀")
     parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
-    parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
+    parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构")
     parser.add_argument('--max_new_tokens', default=512, type=int, help="最大生成长度")
-    parser.add_argument('--temperature', default=0.9, type=float, help="生成温度，控制随机性（0-1，越大越随机）")
-    parser.add_argument('--top_p', default=0.9, type=float, help="nucleus采样阈值（0-1）")
-    parser.add_argument('--show_speed', default=0, type=int, help="显示decode速度（tokens/s）")
+    parser.add_argument('--temperature', default=0.9, type=float, help="生成温度")
+    parser.add_argument('--top_p', default=0.9, type=float, help="nucleus采样阈值")
+    parser.add_argument('--show_speed', default=0, type=int, help="显示decode速度")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
     parser.add_argument('--api_base_url', default="http://localhost:11434/v1", type=str, help="OpenAI兼容接口的base_url")
     parser.add_argument('--api_key', default='sk-123', type=str, help="OpenAI兼容接口的api_key")
     parser.add_argument('--api_model', default='jingyaogong/minimind-3:latest', type=str, help="API请求时使用的模型名称")
-    parser.add_argument('--stream', default=1, type=int, help="API模式下是否流式输出（0=否，1=是）")
+    parser.add_argument('--stream', default=1, type=int, help="API模式下是否流式输出")
+    parser.add_argument('--benchmark', default=0, type=int, choices=[0, 1], help="运行完整基准测试（0=交互模式，1=自动评测）")
     args = parser.parse_args()
 
     model = tokenizer = client = None
-    if args.backend == 'local': model, tokenizer = init_model(args)
-    else: client = OpenAI(api_key=args.api_key, base_url=args.api_base_url)
+    if args.backend == 'local':
+        model, tokenizer = init_model(args)
+    else:
+        client = OpenAI(api_key=args.api_key, base_url=args.api_base_url)
 
-    input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
-
-    cases = [{"prompt": case["prompt"], "tools": get_tools(case["tools"]), "tool_names": case["tools"]} for case in TEST_CASES] if input_mode == 0 else iter(lambda: {"prompt": input('💬: '), "tools": TOOLS, "tool_names": [t["function"]["name"] for t in TOOLS]}, {"prompt": "", "tools": TOOLS, "tool_names": []})
-    for case in cases:
-        if not case["prompt"]: break
-        setup_seed(random.randint(0, 31415926))
+    if args.benchmark:
+        run_benchmark(args, model=model, tokenizer=tokenizer, client=client)
+    else:
+        input_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
         if input_mode == 0:
-            print(f'📦 可用工具: {case["tool_names"]}\n')
-            print(f'💬: {case["prompt"]}')
-        run_case(case["prompt"], case["tools"], args, model=model, tokenizer=tokenizer, client=client)
-        print('\n' + '-' * 50 + '\n')
+            cases = [{"prompt": case["prompt"], "tools": get_tools(case["tools"]), "tool_names": case["tools"]} for case in TEST_CASES]
+        else:
+            def get_manual_input():
+                prompt = input('💬: ')
+                return {"prompt": prompt, "tools": TOOLS, "tool_names": [t["function"]["name"] for t in TOOLS]} if prompt else None
+            cases = iter(lambda: get_manual_input(), None)
+        for case in cases:
+            if not case or not case.get("prompt"):
+                break
+            setup_seed(random.randint(0, 31415926))
+            if input_mode == 0:
+                print(f'📦 可用工具: {case["tool_names"]}\n')
+                print(f'💬: {case["prompt"]}')
+            run_case(case["prompt"], case["tools"], args, model=model, tokenizer=tokenizer, client=client)
+            print('\n' + '-' * 50 + '\n')
 
 
 if __name__ == "__main__":

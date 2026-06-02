@@ -56,16 +56,34 @@ class PretrainDataset(Dataset):
 
 
 class SFTDataset(Dataset):
-    def __init__(self, jsonl_path, tokenizer, max_length=1024, unanswerable_ratio=0.05, unanswerable_templates_path=None):
+    def __init__(self, jsonl_path, tokenizer, max_length=1024, unanswerable_ratio=0.05, unanswerable_templates_path=None, tool_call_ratio=0.0, tool_call_data_path=None):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.unanswerable_ratio = unanswerable_ratio
+        self.tool_call_ratio = tool_call_ratio
+        self.tool_call_samples = []
+        if tool_call_ratio > 0 and tool_call_data_path and os.path.exists(tool_call_data_path):
+            with open(tool_call_data_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        data = json.loads(line.strip())
+                        if 'conversations' in data:
+                            self.tool_call_samples.append(data['conversations'])
+                    except Exception:
+                        pass
+            if self.tool_call_samples:
+                print(f"[Info] Loaded {len(self.tool_call_samples)} tool call samples for SFT mixing (ratio={tool_call_ratio})")
+            else:
+                print(f"[Warning] No valid tool call samples found in {tool_call_data_path}")
+                self.tool_call_ratio = 0.0
+        elif tool_call_ratio > 0:
+            print(f"[Warning] tool_call_ratio={tool_call_ratio} but no tool_call_data_path provided, skipping tool call mixing")
+            self.tool_call_ratio = 0.0
         features = Features({'conversations': [{'role': Value('string'), 'content': Value('string'), 'reasoning_content': Value('string'), 'tools': Value('string'), 'tool_calls': Value('string')}]})
         self.samples = load_dataset('json', data_files=jsonl_path, split='train', features=features)
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
         self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids
-        # 加载不可回答样本模板：优先从外部文件，否则使用内置模板
         self._unanswerable_templates = self._load_unanswerable_templates(unanswerable_templates_path)
 
     def __len__(self):
@@ -146,13 +164,16 @@ class SFTDataset(Dataset):
         return labels
 
     def __getitem__(self, index):
-        # 以一定概率注入"不可回答"样本，让模型学会诚实放弃
         if random.random() < self.unanswerable_ratio:
             question, answer = random.choice(self._unanswerable_templates)
             conversations = [
                 {"role": "user", "content": question},
                 {"role": "assistant", "content": answer}
             ]
+            prompt = self.create_chat_prompt(conversations)
+        elif random.random() < self.tool_call_ratio and self.tool_call_samples:
+            conversations = random.choice(self.tool_call_samples)
+            conversations = pre_processing_chat(conversations)
             prompt = self.create_chat_prompt(conversations)
         else:
             sample = self.samples[index]
