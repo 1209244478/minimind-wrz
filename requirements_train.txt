@@ -1,0 +1,10 @@
+# AgentLM 训练最小依赖 (不含 Omni 音频/视觉)
+transformers>=4.40.0
+numpy>=1.24.0
+Pillow>=9.0
+modelscope>=1.20.0
+swanlab>=0.5.0
+flask>=3.0
+flask-cors>=6.0
+# torch 请根据 CUDA 版本安装:
+# pip install torch --index-url https://download.pytorch.org/whl/cu121
