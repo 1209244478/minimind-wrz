@@ -426,10 +426,14 @@ evaluate() {
     for SIZE in 768 1024 1280 2048; do
       if [ -f "out/${WEIGHT}_${SIZE}.pth" ]; then
         echo "  评估: ${WEIGHT}_${SIZE}"
-        python scripts/eval_toolcall.py --weight "$WEIGHT" --benchmark 1 2>/dev/null || true
+        python scripts/eval_toolcall.py --weight "$WEIGHT" --hidden_size "$SIZE" --benchmark 1 2>/dev/null || true
       fi
     done
   done
+
+  # 汇总结果
+  echo "  汇总评估结果..."
+  python scripts/collect_results.py --output results_summary.md 2>/dev/null || true
 
   cd trainer
   echo "  评估完成"

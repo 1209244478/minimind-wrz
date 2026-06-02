@@ -169,7 +169,7 @@ def rollout_batch(rollout_engine, tokenizer, messages_batch, tools_batch, num_ge
     return all_completions, all_contexts, all_prompt_ids, all_response_ids, all_response_masks, all_response_old_logps, all_turn_outputs, all_unfinished
 
 # ================================ 工具与 Reward = End ================================
-def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model=None, start_step=0, wandb=None, use_sglang=False):
+def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model=None, start_step=0, wandb=None, use_sglang=False, metrics_log=None):
     last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
         messages_batch = batch['messages']
@@ -291,6 +291,8 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
             Logger(f'Epoch:[{epoch+1}/{args.epochs}]({step}/{iters}), Reward:{ar:.4f}, KL:{kl:.4f}, GrpStd:{gs:.4f}, AdvStd:{ast:.4f}, Loss:{pl:.4f}, AvgLen:{al:.2f}, AdvMean:{am:.4f}, LR:{lr:.8f}')
             if wandb and is_main_process():
                 wandb.log({"reward":ar,"kl_ref":kl,"group_reward_std":gs,"advantages_std":ast,"policy_loss":pl,"avg_response_len":al,"advantages_mean":am,"learning_rate":lr})
+            if metrics_log is not None:
+                metrics_log.append({"epoch": epoch+1, "step": step, "reward": ar, "kl": kl, "group_reward_std": gs, "advantages_std": ast, "policy_loss": pl, "avg_response_len": al, "lr": lr})
 
         if (step % args.save_interval == 0 or step == iters) and is_main_process():
             model.eval()
@@ -433,6 +435,7 @@ if __name__ == "__main__":
         model = DistributedDataParallel(model, device_ids=[local_rank])
     rollout_engine.update_policy(model)
 
+    metrics_log = []
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)
         setup_seed(42 + epoch); indices = torch.randperm(len(train_ds)).tolist()
@@ -441,8 +444,17 @@ if __name__ == "__main__":
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn)
         if skip > 0:
             Logger(f'Epoch [{epoch+1}/{args.epochs}]: skip {start_step} steps')
-            rl_train_epoch(epoch, loader, len(loader) + skip, rollout_engine, ref_model, reward_model, start_step, wandb, use_sglang = (args.rollout_engine == "sglang"))
+            rl_train_epoch(epoch, loader, len(loader) + skip, rollout_engine, ref_model, reward_model, start_step, wandb, use_sglang = (args.rollout_engine == "sglang"), metrics_log=metrics_log)
         else:
-            rl_train_epoch(epoch, loader, len(loader), rollout_engine, ref_model, reward_model, 0, wandb, use_sglang = (args.rollout_engine == "sglang"))
+            rl_train_epoch(epoch, loader, len(loader), rollout_engine, ref_model, reward_model, 0, wandb, use_sglang = (args.rollout_engine == "sglang"), metrics_log=metrics_log)
+
+    # 保存训练指标
+    if metrics_log and is_main_process():
+        moe_suffix = '_moe' if lm_config.use_moe else ''
+        metrics_path = f"../metrics/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}_agent.json"
+        os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+        with open(metrics_path, 'w', encoding='utf-8') as f:
+            json.dump(metrics_log, f, indent=2, ensure_ascii=False)
+        Logger(f'Metrics saved to {metrics_path}')
 
     if dist.is_initialized(): dist.destroy_process_group()

@@ -333,6 +333,17 @@ def run_benchmark(args, model=None, tokenizer=None, client=None):
     print(f'Valid Args Rate:   {results["args_valid"]}/{results["total"]} = {results["args_valid"]/max(results["total"],1)*100:.1f}%')
     if results["multi_turn_total"] > 0:
         print(f'Multi-turn Rate:   {results["multi_turn_success"]}/{results["multi_turn_total"]} = {results["multi_turn_success"]/max(results["multi_turn_total"],1)*100:.1f}%')
+    # 保存结果到 JSON
+    results["tool_call_rate"] = results["tool_called"] / max(results["total"], 1)
+    results["correct_tool_rate"] = results["correct_tool"] / max(results["total"], 1)
+    results["valid_args_rate"] = results["args_valid"] / max(results["total"], 1)
+    if results["multi_turn_total"] > 0:
+        results["multi_turn_rate"] = results["multi_turn_success"] / max(results["multi_turn_total"], 1)
+    os.makedirs("../eval_results", exist_ok=True)
+    result_file = f"../eval_results/{getattr(args, '_result_prefix', args.weight)}_{args.hidden_size}.json"
+    with open(result_file, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    print(f'Results saved to {result_file}')
     return results
 
 
