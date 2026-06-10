@@ -415,7 +415,7 @@ if __name__ == "__main__":
         sglang_model_path=args.sglang_model_path,
         sglang_shared_path=args.sglang_shared_path,
     )
-    train_ds = AgentRLDataset(args.data_path, tokenizer, max_length=lm_config.max_seq_len)
+    train_ds = AgentRLDataset(args.data_path, tokenizer, max_length=lm_config.max_position_embeddings)
     system_prompt = SYSTEM_PROMPTS.get(args.system_prompt_type, SYSTEM_PROMPTS["default"])
     Logger(f"System prompt type: {args.system_prompt_type}")
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
